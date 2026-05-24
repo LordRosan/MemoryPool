@@ -1,0 +1,6 @@
+#ifndef MEMORYPOOL_LIBRARY_H
+#define MEMORYPOOL_LIBRARY_H
+
+void hello();
+
+#endif // MEMORYPOOL_LIBRARY_H
