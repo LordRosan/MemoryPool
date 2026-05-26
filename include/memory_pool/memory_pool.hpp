@@ -10,7 +10,5 @@
 #include "memory_pool/thread_cached_fixed_block_pool.hpp"
 
 namespace memory_pool {
-
-[[nodiscard]] const char* version() noexcept;
-
+    [[nodiscard]] const char *version() noexcept;
 } // namespace memory_pool

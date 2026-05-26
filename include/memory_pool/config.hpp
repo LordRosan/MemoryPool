@@ -27,11 +27,9 @@
 #endif
 
 namespace memory_pool {
-
-inline constexpr int version_major = MEMORY_POOL_VERSION_MAJOR;
-inline constexpr int version_minor = MEMORY_POOL_VERSION_MINOR;
-inline constexpr int version_patch = MEMORY_POOL_VERSION_PATCH;
-inline constexpr const char* version_string = MEMORY_POOL_VERSION_STRING;
-inline constexpr bool tracking_enabled_by_default = MEMORY_POOL_ENABLE_TRACKING_BY_DEFAULT != 0;
-
+    inline constexpr int version_major = MEMORY_POOL_VERSION_MAJOR;
+    inline constexpr int version_minor = MEMORY_POOL_VERSION_MINOR;
+    inline constexpr int version_patch = MEMORY_POOL_VERSION_PATCH;
+    inline constexpr const char *version_string = MEMORY_POOL_VERSION_STRING;
+    inline constexpr bool tracking_enabled_by_default = MEMORY_POOL_ENABLE_TRACKING_BY_DEFAULT != 0;
 } // namespace memory_pool
