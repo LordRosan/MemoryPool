@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,9 +37,45 @@
 #define MEMORY_POOL_RESULTS_DIR "results"
 #endif
 
+#if defined(MEMORY_POOL_TEST_ALL) || defined(MEMORY_POOL_TEST_UNIT) || !defined(MEMORY_POOL_CORRECTNESS_ONLY)
+#define MEMORY_POOL_RUN_UNIT_TESTS 1
+#endif
+
+#if defined(MEMORY_POOL_TEST_ALL) || defined(MEMORY_POOL_TEST_STRESS) || !defined(MEMORY_POOL_CORRECTNESS_ONLY)
+#define MEMORY_POOL_RUN_STRESS_TESTS 1
+#endif
+
+#if defined(MEMORY_POOL_TEST_ALL) || defined(MEMORY_POOL_TEST_RANDOMIZED) || !defined(MEMORY_POOL_CORRECTNESS_ONLY)
+#define MEMORY_POOL_RUN_RANDOMIZED_TESTS 1
+#endif
+
 namespace {
 #if !defined(MEMORY_POOL_CORRECTNESS_ONLY)
     using clock_type = std::chrono::steady_clock;
+    constexpr std::size_t benchmark_sample_count = 7;
+
+    [[nodiscard]] double median_value(std::vector<double> values) {
+        if (values.empty()) {
+            return 0.0;
+        }
+
+        std::sort(values.begin(), values.end());
+        const std::size_t middle = values.size() / 2;
+        if ((values.size() % 2) != 0) {
+            return values[middle];
+        }
+        return (values[middle - 1] + values[middle]) / 2.0;
+    }
+
+    [[nodiscard]] double percentile_value(std::vector<double> values, std::size_t percentile) {
+        if (values.empty()) {
+            return 0.0;
+        }
+
+        std::sort(values.begin(), values.end());
+        const std::size_t index = std::min(values.size() - 1, ((values.size() * percentile) + 99) / 100 - 1);
+        return values[index];
+    }
 
     struct benchmark_result {
         std::string group;
@@ -45,13 +83,57 @@ namespace {
         std::string parameters;
         std::size_t operations = 0;
         double total_ms = 0.0;
+        std::vector<double> sample_ms;
 
-        [[nodiscard]] double ns_per_op() const noexcept {
-            return operations == 0 ? 0.0 : (total_ms * 1'000'000.0) / static_cast<double>(operations);
+        [[nodiscard]] double ns_per_op() const {
+            return operations == 0 ? 0.0 : (median_ms() * 1'000'000.0) / static_cast<double>(operations);
         }
 
-        [[nodiscard]] double ops_per_second() const noexcept {
-            return total_ms <= 0.0 ? 0.0 : (static_cast<double>(operations) * 1000.0) / total_ms;
+        [[nodiscard]] double ops_per_second() const {
+            const double median = median_ms();
+            return median <= 0.0 ? 0.0 : (static_cast<double>(operations) * 1000.0) / median;
+        }
+
+        [[nodiscard]] std::size_t sample_count() const noexcept {
+            return sample_ms.empty() ? 1 : sample_ms.size();
+        }
+
+        [[nodiscard]] double median_ms() const {
+            return sample_ms.empty() ? total_ms : median_value(sample_ms);
+        }
+
+        [[nodiscard]] double min_ms() const {
+            if (sample_ms.empty()) {
+                return total_ms;
+            }
+            return *std::min_element(sample_ms.begin(), sample_ms.end());
+        }
+
+        [[nodiscard]] double p95_ms() const {
+            return sample_ms.empty() ? total_ms : percentile_value(sample_ms, 95);
+        }
+
+        [[nodiscard]] double min_ns_per_op() const {
+            return operations == 0 ? 0.0 : (min_ms() * 1'000'000.0) / static_cast<double>(operations);
+        }
+
+        [[nodiscard]] double p95_ns_per_op() const {
+            return operations == 0 ? 0.0 : (p95_ms() * 1'000'000.0) / static_cast<double>(operations);
+        }
+
+        [[nodiscard]] double stddev_ns_per_op() const {
+            if (operations == 0 || sample_ms.size() <= 1) {
+                return 0.0;
+            }
+
+            const double median = median_ms();
+            double variance = 0.0;
+            for (double sample: sample_ms) {
+                const double delta = sample - median;
+                variance += delta * delta;
+            }
+            variance /= static_cast<double>(sample_ms.size() - 1);
+            return (std::sqrt(variance) * 1'000'000.0) / static_cast<double>(operations);
         }
     };
 #endif
@@ -93,13 +175,19 @@ namespace {
         Warmup warmup,
         Work work) {
         warmup();
-        clobber_memory();
-        const auto start = clock_type::now();
-        work();
-        clobber_memory();
-        const auto finish = clock_type::now();
-        const std::chrono::duration<double, std::milli> elapsed = finish - start;
-        return {std::move(group), std::move(name), std::move(parameters), operations, elapsed.count()};
+        std::vector<double> samples;
+        samples.reserve(benchmark_sample_count);
+        for (std::size_t sample = 0; sample < benchmark_sample_count; ++sample) {
+            clobber_memory();
+            const auto start = clock_type::now();
+            work();
+            clobber_memory();
+            const auto finish = clock_type::now();
+            const std::chrono::duration<double, std::milli> elapsed = finish - start;
+            samples.push_back(elapsed.count());
+        }
+        const double median_ms = median_value(samples);
+        return {std::move(group), std::move(name), std::move(parameters), operations, median_ms, std::move(samples)};
     }
 
     std::string timestamp_for_file() {
@@ -191,6 +279,7 @@ namespace {
     std::vector<correctness_check> run_correctness_tests() {
         std::vector<correctness_check> checks;
 
+#if defined(MEMORY_POOL_RUN_UNIT_TESTS)
         checks.push_back(run_correctness_check("fixed_block_pool default double free", [] {
             memory_pool::pool_options options;
             options.block_size = sizeof(int);
@@ -465,6 +554,133 @@ namespace {
                 stats.reserved_bytes() == std::numeric_limits<std::size_t>::max(),
                 "pool_stats::reserved_bytes 溢出时必须返回饱和值");
         }));
+#endif
+
+#if defined(MEMORY_POOL_RUN_STRESS_TESTS)
+        checks.push_back(run_correctness_check("fixed_block_pool sustained stress", [] {
+            memory_pool::pool_options options;
+            options.block_size = sizeof(payload);
+            options.block_alignment = alignof(payload);
+            options.blocks_per_slab = 64;
+            options.max_blocks = 512;
+            options.enable_tracking = true;
+
+            memory_pool::fixed_block_pool pool(options);
+            std::vector<void *> live;
+            live.reserve(options.max_blocks);
+
+            for (std::size_t i = 0; i < 50'000; ++i) {
+                if (live.empty() || (live.size() < options.max_blocks && (i % 3) != 0)) {
+                    void *pointer = pool.allocate();
+                    require_correctness(pointer != nullptr, "stress allocation 不应返回 nullptr");
+                    require_correctness(pool.owns(pointer), "stress allocation 必须返回 pool owned pointer");
+                    live.push_back(pointer);
+                } else {
+                    pool.deallocate(live.back());
+                    live.pop_back();
+                }
+
+                if ((i % 1024) == 0) {
+                    require_correctness(pool.stats().used_blocks == live.size(),
+                                        "stress path stats.used_blocks 必须匹配 live set");
+                }
+            }
+
+            for (void *pointer: live) {
+                pool.deallocate(pointer);
+            }
+            require_correctness(pool.stats().used_blocks == 0, "stress cleanup 后 used_blocks 必须归零");
+        }));
+
+        checks.push_back(run_correctness_check("thread_cached_fixed_block_pool concurrent stress", [] {
+            memory_pool::pool_options pool_options;
+            pool_options.block_size = sizeof(payload);
+            pool_options.block_alignment = alignof(payload);
+            pool_options.blocks_per_slab = 256;
+            pool_options.enable_tracking = true;
+
+            memory_pool::thread_cache_options cache_options;
+            cache_options.max_cached_blocks = 64;
+            cache_options.refill_count = 32;
+            cache_options.release_count = 32;
+
+            memory_pool::thread_cached_fixed_block_pool pool(pool_options, cache_options);
+            constexpr std::size_t thread_count = 4;
+            constexpr std::size_t iterations = 20'000;
+            std::atomic<std::size_t> failures = 0;
+            std::vector<std::thread> threads;
+            threads.reserve(thread_count);
+
+            for (std::size_t thread_index = 0; thread_index < thread_count; ++thread_index) {
+                threads.emplace_back([&] {
+                    auto cache = pool.make_cache();
+                    for (std::size_t i = 0; i < iterations; ++i) {
+                        void *pointer = cache.allocate();
+                        if (pointer == nullptr || !cache.try_deallocate(pointer)) {
+                            failures.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                });
+            }
+
+            for (auto &thread: threads) {
+                thread.join();
+            }
+
+            require_correctness(failures.load(std::memory_order_relaxed) == 0,
+                                "thread cache stress 不应出现 allocation/deallocation failure");
+            require_correctness(pool.stats().used_blocks == 0, "所有 local_cache 析构后 upstream used_blocks 必须归零");
+        }));
+#endif
+
+#if defined(MEMORY_POOL_RUN_RANDOMIZED_TESTS)
+        checks.push_back(run_correctness_check("fixed_block_pool randomized model", [] {
+            memory_pool::pool_options options;
+            options.block_size = sizeof(payload);
+            options.block_alignment = alignof(payload);
+            options.blocks_per_slab = 16;
+            options.max_blocks = 128;
+            options.enable_tracking = true;
+
+            memory_pool::fixed_block_pool pool(options);
+            std::mt19937 rng(0x515151);
+            std::uniform_int_distribution<int> action_dist(0, 99);
+            std::vector<void *> live;
+            std::unordered_set<void *> active;
+            live.reserve(options.max_blocks);
+            active.reserve(options.max_blocks);
+
+            for (std::size_t step = 0; step < 20'000; ++step) {
+                const bool allocate = live.empty() || (live.size() < options.max_blocks && action_dist(rng) < 58);
+                if (allocate) {
+                    void *pointer = pool.try_allocate();
+                    require_correctness(pointer != nullptr, "randomized model 在容量未满时必须成功分配");
+                    require_correctness(reinterpret_cast<std::uintptr_t>(pointer) % alignof(payload) == 0,
+                                        "返回 pointer 必须满足 block alignment");
+                    require_correctness(active.insert(pointer).second, "randomized model 不应返回仍处于 active 状态的 pointer");
+                    live.push_back(pointer);
+                } else {
+                    std::uniform_int_distribution<std::size_t> index_dist(0, live.size() - 1);
+                    const std::size_t index = index_dist(rng);
+                    void *pointer = live[index];
+                    require_correctness(pool.try_deallocate(pointer), "randomized model 中 live pointer 必须可归还");
+                    active.erase(pointer);
+                    live[index] = live.back();
+                    live.pop_back();
+                }
+
+                require_correctness(pool.stats().used_blocks == active.size(),
+                                    "randomized model stats.used_blocks 必须匹配 active set");
+            }
+
+            while (!live.empty()) {
+                void *pointer = live.back();
+                live.pop_back();
+                require_correctness(pool.try_deallocate(pointer), "randomized cleanup 必须成功归还 live pointer");
+            }
+            require_correctness(pool.stats().used_blocks == 0, "randomized cleanup 后 used_blocks 必须归零");
+        }));
+#endif
 
         return checks;
     }
@@ -608,6 +824,24 @@ namespace {
             body);
     }
 
+    template<typename Measure>
+    benchmark_result run_measured_case(
+        std::string group,
+        std::string name,
+        std::string parameters,
+        std::size_t operations,
+        Measure measure) {
+        std::vector<double> samples;
+        samples.reserve(benchmark_sample_count);
+        for (std::size_t sample = 0; sample < benchmark_sample_count; ++sample) {
+            clobber_memory();
+            samples.push_back(measure());
+            clobber_memory();
+        }
+        const double median_ms = median_value(samples);
+        return {std::move(group), std::move(name), std::move(parameters), operations, median_ms, std::move(samples)};
+    }
+
     benchmark_result shared_pool_threaded_case() {
         const std::size_t threads = std::max(2u, std::min(8u, std::thread::hardware_concurrency()));
         constexpr std::size_t iterations = 120'000;
@@ -617,41 +851,43 @@ namespace {
         options.blocks_per_slab = 4096;
         options.enable_tracking = false;
         memory_pool::fixed_block_pool pool(options);
-        std::atomic<std::size_t> ready = 0;
-        std::atomic<bool> start = false;
-        auto worker = [&] {
-            ready.fetch_add(1, std::memory_order_release);
-            while (!start.load(std::memory_order_acquire)) {
+        auto measure = [&] {
+            std::atomic<std::size_t> ready = 0;
+            std::atomic<bool> start = false;
+            auto worker = [&] {
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (std::size_t i = 0; i < iterations; ++i) {
+                    void *p = pool.allocate();
+                    do_not_optimize(p);
+                    pool.deallocate(p);
+                }
+            };
+            std::vector<std::thread> workers;
+            workers.reserve(threads);
+            for (std::size_t i = 0; i < threads; ++i) {
+                workers.emplace_back(worker);
+            }
+            while (ready.load(std::memory_order_acquire) != threads) {
                 std::this_thread::yield();
             }
-            for (std::size_t i = 0; i < iterations; ++i) {
-                void *p = pool.allocate();
-                do_not_optimize(p);
-                pool.deallocate(p);
+            const auto begin = clock_type::now();
+            start.store(true, std::memory_order_release);
+            for (auto &thread: workers) {
+                thread.join();
             }
+            const auto end = clock_type::now();
+            const std::chrono::duration<double, std::milli> elapsed = end - begin;
+            return elapsed.count();
         };
-        std::vector<std::thread> workers;
-        workers.reserve(threads);
-        for (std::size_t i = 0; i < threads; ++i) {
-            workers.emplace_back(worker);
-        }
-        while (ready.load(std::memory_order_acquire) != threads) {
-            std::this_thread::yield();
-        }
-        const auto begin = clock_type::now();
-        start.store(true, std::memory_order_release);
-        for (auto &thread: workers) {
-            thread.join();
-        }
-        const auto end = clock_type::now();
-        const std::chrono::duration<double, std::milli> elapsed = end - begin;
-        return {
+        return run_measured_case(
             "concurrent allocation",
             "fixed_block_pool shared concurrency",
             "threads=" + std::to_string(threads) + "; iterations/thread=120000; tracking=off",
             threads * iterations * 2,
-            elapsed.count()
-        };
+            measure);
     }
 
     benchmark_result sharded_pool_threaded_case() {
@@ -663,41 +899,43 @@ namespace {
         options.blocks_per_slab = 4096;
         options.enable_tracking = false;
         memory_pool::sharded_fixed_block_pool pool(options, threads);
-        std::atomic<std::size_t> ready = 0;
-        std::atomic<bool> start = false;
-        auto worker = [&] {
-            ready.fetch_add(1, std::memory_order_release);
-            while (!start.load(std::memory_order_acquire)) {
+        auto measure = [&] {
+            std::atomic<std::size_t> ready = 0;
+            std::atomic<bool> start = false;
+            auto worker = [&] {
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (std::size_t i = 0; i < iterations; ++i) {
+                    void *p = pool.allocate();
+                    do_not_optimize(p);
+                    pool.deallocate(p);
+                }
+            };
+            std::vector<std::thread> workers;
+            workers.reserve(threads);
+            for (std::size_t i = 0; i < threads; ++i) {
+                workers.emplace_back(worker);
+            }
+            while (ready.load(std::memory_order_acquire) != threads) {
                 std::this_thread::yield();
             }
-            for (std::size_t i = 0; i < iterations; ++i) {
-                void *p = pool.allocate();
-                do_not_optimize(p);
-                pool.deallocate(p);
+            const auto begin = clock_type::now();
+            start.store(true, std::memory_order_release);
+            for (auto &thread: workers) {
+                thread.join();
             }
+            const auto end = clock_type::now();
+            const std::chrono::duration<double, std::milli> elapsed = end - begin;
+            return elapsed.count();
         };
-        std::vector<std::thread> workers;
-        workers.reserve(threads);
-        for (std::size_t i = 0; i < threads; ++i) {
-            workers.emplace_back(worker);
-        }
-        while (ready.load(std::memory_order_acquire) != threads) {
-            std::this_thread::yield();
-        }
-        const auto begin = clock_type::now();
-        start.store(true, std::memory_order_release);
-        for (auto &thread: workers) {
-            thread.join();
-        }
-        const auto end = clock_type::now();
-        const std::chrono::duration<double, std::milli> elapsed = end - begin;
-        return {
+        return run_measured_case(
             "concurrent allocation",
             "sharded_fixed_block_pool concurrency",
             "threads=" + std::to_string(threads) + "; shards=" + std::to_string(threads) + "; iterations/thread=120000",
             threads * iterations * 2,
-            elapsed.count()
-        };
+            measure);
     }
 
     benchmark_result thread_cached_pool_threaded_case() {
@@ -715,83 +953,87 @@ namespace {
         cache_options.release_count = 64;
         memory_pool::thread_cached_fixed_block_pool pool(options, cache_options);
 
-        std::atomic<std::size_t> ready = 0;
-        std::atomic<bool> start = false;
-        auto worker = [&] {
-            auto cache = pool.make_cache();
-            ready.fetch_add(1, std::memory_order_release);
-            while (!start.load(std::memory_order_acquire)) {
+        auto measure = [&] {
+            std::atomic<std::size_t> ready = 0;
+            std::atomic<bool> start = false;
+            auto worker = [&] {
+                auto cache = pool.make_cache();
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (std::size_t i = 0; i < iterations; ++i) {
+                    void *p = cache.allocate();
+                    do_not_optimize(p);
+                    cache.deallocate(p);
+                }
+            };
+
+            std::vector<std::thread> workers;
+            workers.reserve(threads);
+            for (std::size_t i = 0; i < threads; ++i) {
+                workers.emplace_back(worker);
+            }
+            while (ready.load(std::memory_order_acquire) != threads) {
                 std::this_thread::yield();
             }
-            for (std::size_t i = 0; i < iterations; ++i) {
-                void *p = cache.allocate();
-                do_not_optimize(p);
-                cache.deallocate(p);
+            const auto begin = clock_type::now();
+            start.store(true, std::memory_order_release);
+            for (auto &thread: workers) {
+                thread.join();
             }
+            const auto end = clock_type::now();
+            const std::chrono::duration<double, std::milli> elapsed = end - begin;
+            return elapsed.count();
         };
-
-        std::vector<std::thread> workers;
-        workers.reserve(threads);
-        for (std::size_t i = 0; i < threads; ++i) {
-            workers.emplace_back(worker);
-        }
-        while (ready.load(std::memory_order_acquire) != threads) {
-            std::this_thread::yield();
-        }
-        const auto begin = clock_type::now();
-        start.store(true, std::memory_order_release);
-        for (auto &thread: workers) {
-            thread.join();
-        }
-        const auto end = clock_type::now();
-        const std::chrono::duration<double, std::milli> elapsed = end - begin;
-        return {
+        return run_measured_case(
             "concurrent allocation",
             "thread_cached_fixed_block_pool concurrency",
             "threads=" + std::to_string(threads) + "; local_caches=" + std::to_string(threads) + "; refill=64",
             threads * iterations * 2,
-            elapsed.count()
-        };
+            measure);
     }
 
     benchmark_result raw_new_threaded_case() {
         const std::size_t threads = std::max(2u, std::min(8u, std::thread::hardware_concurrency()));
         constexpr std::size_t iterations = 120'000;
-        std::atomic<std::size_t> ready = 0;
-        std::atomic<bool> start = false;
-        auto worker = [&] {
-            ready.fetch_add(1, std::memory_order_release);
-            while (!start.load(std::memory_order_acquire)) {
+        auto measure = [&] {
+            std::atomic<std::size_t> ready = 0;
+            std::atomic<bool> start = false;
+            auto worker = [&] {
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (std::size_t i = 0; i < iterations; ++i) {
+                    void *p = ::operator new(sizeof(payload), std::align_val_t(alignof(payload)));
+                    do_not_optimize(p);
+                    ::operator delete(p, std::align_val_t(alignof(payload)));
+                }
+            };
+            std::vector<std::thread> workers;
+            workers.reserve(threads);
+            for (std::size_t i = 0; i < threads; ++i) {
+                workers.emplace_back(worker);
+            }
+            while (ready.load(std::memory_order_acquire) != threads) {
                 std::this_thread::yield();
             }
-            for (std::size_t i = 0; i < iterations; ++i) {
-                void *p = ::operator new(sizeof(payload), std::align_val_t(alignof(payload)));
-                do_not_optimize(p);
-                ::operator delete(p, std::align_val_t(alignof(payload)));
+            const auto begin = clock_type::now();
+            start.store(true, std::memory_order_release);
+            for (auto &thread: workers) {
+                thread.join();
             }
+            const auto end = clock_type::now();
+            const std::chrono::duration<double, std::milli> elapsed = end - begin;
+            return elapsed.count();
         };
-        std::vector<std::thread> workers;
-        workers.reserve(threads);
-        for (std::size_t i = 0; i < threads; ++i) {
-            workers.emplace_back(worker);
-        }
-        while (ready.load(std::memory_order_acquire) != threads) {
-            std::this_thread::yield();
-        }
-        const auto begin = clock_type::now();
-        start.store(true, std::memory_order_release);
-        for (auto &thread: workers) {
-            thread.join();
-        }
-        const auto end = clock_type::now();
-        const std::chrono::duration<double, std::milli> elapsed = end - begin;
-        return {
+        return run_measured_case(
             "concurrent allocation",
             "raw new/delete shared concurrency",
             "threads=" + std::to_string(threads) + "; iterations/thread=120000",
             threads * iterations * 2,
-            elapsed.count()
-        };
+            measure);
     }
 
     benchmark_result segregated_pmr_case() {
@@ -917,7 +1159,7 @@ namespace {
             return;
         }
 
-        report << "| 用例 | baseline ns/op | current ns/op | Δ ns/op | Δ % | 状态 | 备注 |\n";
+        report << "| 用例 | baseline median ns/op | current median ns/op | Δ ns/op | Δ % | 状态 | 备注 |\n";
         report << "| --- | ---: | ---: | ---: | ---: | --- | --- |\n";
         for (const auto &result: results) {
             const auto found = baseline.find(result.name);
@@ -957,6 +1199,7 @@ namespace {
         report << "- Build: Release (`NDEBUG` defined)\n";
         report << "- Timestamp: " << timestamp_pretty() << '\n';
         report << "- Random seed: 0xC0FFEE / 0xBADC0DE\n";
+        report << "- Benchmark samples: " << benchmark_sample_count << '\n';
         report << "- Result file: " << report_path.generic_string() << "\n\n";
 
         report << "## 正确性测试\n\n";
@@ -981,7 +1224,7 @@ namespace {
         const auto group_best_ns = best_ns_by_group(group_bests);
 
         report << "`相对组内 best` 使用同一 `组别` 中最低 `ns/op` 作为 1.00x，比较指标只看 `ns/op`。\n\n";
-        report << "| 组别 | best 用例 | best ns/op | 比较指标 |\n";
+        report << "| 组别 | best 用例 | best median ns/op | 比较指标 |\n";
         report << "| --- | --- | ---: | --- |\n";
         for (const benchmark_result *best: group_bests) {
             report << "| " << best->group
@@ -990,8 +1233,9 @@ namespace {
                     << " | ns/op |\n";
         }
 
-        report << "\n| 组别 | 用例 | 测试参数 | 操作次数 | 总耗时 ms | ns/op | ops/s | 相对组内 best |\n";
-        report << "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n";
+        report <<
+                "\n| 组别 | 用例 | 测试参数 | 操作次数/样本 | 样本数 | median ms | min ns/op | median ns/op | p95 ns/op | stddev ns/op | ops/s | 相对组内 best |\n";
+        report << "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
         for (const auto &result: results) {
             const auto best = group_best_ns.find(result.group);
             const double relative_best = best != group_best_ns.end() && best->second > 0.0 && result.ns_per_op() > 0.0
@@ -1001,8 +1245,12 @@ namespace {
                     << " | " << result.name
                     << " | " << result.parameters
                     << " | " << result.operations
-                    << " | " << std::fixed << std::setprecision(3) << result.total_ms
+                    << " | " << result.sample_count()
+                    << " | " << std::fixed << std::setprecision(3) << result.median_ms()
+                    << " | " << std::fixed << std::setprecision(2) << result.min_ns_per_op()
                     << " | " << std::fixed << std::setprecision(2) << result.ns_per_op()
+                    << " | " << std::fixed << std::setprecision(2) << result.p95_ns_per_op()
+                    << " | " << std::fixed << std::setprecision(2) << result.stddev_ns_per_op()
                     << " | " << std::fixed << std::setprecision(0) << result.ops_per_second()
                     << " | " << std::fixed << std::setprecision(2) << relative_best << "x"
                     << " |\n";
@@ -1023,6 +1271,7 @@ namespace {
         report << "## 测试方法\n\n";
         report << "- 正确性测试在 benchmark 前执行；任何失败都会终止 benchmark。\n";
         report << "- Warmup 在计时区间前执行，避免冷启动状态主导结果。\n";
+        report << "- 每个 benchmark case 采集多个样本，报告使用 median 作为 baseline 对比和 `相对组内 best` 的主指标。\n";
         report << "- 随机释放顺序和 PMR string 长度在计时前生成，不计入 allocator 热路径。\n";
         report << "- bulk allocation 和 thread-local cache paths 用于覆盖更接近生产 allocator 的热路径。\n";
         report << "- `do_not_optimize` 和 compiler memory barrier 用于降低编译器过度优化风险。\n";

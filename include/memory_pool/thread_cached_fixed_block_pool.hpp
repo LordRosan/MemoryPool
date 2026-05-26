@@ -21,7 +21,8 @@ namespace memory_pool {
         class local_cache {
         public:
             explicit local_cache(thread_cached_fixed_block_pool &owner)
-                : owner_(&owner) {
+                : owner_(&owner),
+                  cached_() {
                 cached_.reserve(owner_->cache_options_.max_cached_blocks);
             }
 

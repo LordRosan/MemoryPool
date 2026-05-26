@@ -19,6 +19,18 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "MEMORYPOOL_BUILD_BENCHMARK": "OFF"
       }
+    },
+    {
+      "name": "analysis",
+      "displayName": "Static analysis",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-analysis",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MEMORYPOOL_BUILD_BENCHMARK": "OFF",
+        "MEMORYPOOL_ENABLE_CLANG_TIDY": "OFF",
+        "MEMORYPOOL_ENABLE_GCC_ANALYZER": "ON"
+      }
     }
   ]
 }

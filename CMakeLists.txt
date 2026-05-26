@@ -13,6 +13,9 @@ include(CTest)
 
 option(MEMORYPOOL_BUILD_BENCHMARK "Build the standalone Release benchmark when test.cpp is present" ${PROJECT_IS_TOP_LEVEL})
 option(MEMORYPOOL_BUILD_TESTS "Build standalone correctness and package validation tests" ${PROJECT_IS_TOP_LEVEL})
+option(MEMORYPOOL_ENABLE_PACKAGE_VALIDATION "Enable install-tree package validation through CTest" ON)
+option(MEMORYPOOL_ENABLE_GCC_ANALYZER "Enable GCC -fanalyzer during compilation" OFF)
+option(MEMORYPOOL_ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 option(MEMORYPOOL_WARNINGS_AS_ERRORS "Treat MemoryPool warnings as errors" OFF)
 
 function(memorypool_apply_warnings target)
@@ -27,6 +30,39 @@ function(memorypool_apply_warnings target)
             target_compile_options(${target} PRIVATE -Werror)
         endif ()
     endif ()
+endfunction()
+
+function(memorypool_apply_static_analysis target)
+    if (MEMORYPOOL_ENABLE_GCC_ANALYZER)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${target} PRIVATE
+                    -fanalyzer
+                    -Wno-analyzer-malloc-leak
+                    -Wno-analyzer-use-of-uninitialized-value
+            )
+        else ()
+            message(FATAL_ERROR "MEMORYPOOL_ENABLE_GCC_ANALYZER=ON requires GNU C++.")
+        endif ()
+    endif ()
+
+    if (NOT MEMORYPOOL_ENABLE_CLANG_TIDY)
+        return()
+    endif ()
+
+    find_program(MEMORYPOOL_CLANG_TIDY_EXE NAMES clang-tidy)
+    if (NOT MEMORYPOOL_CLANG_TIDY_EXE)
+        message(FATAL_ERROR "MEMORYPOOL_ENABLE_CLANG_TIDY=ON requires clang-tidy in PATH.")
+    endif ()
+    set(MEMORYPOOL_CLANG_TIDY_COMMAND "${MEMORYPOOL_CLANG_TIDY_EXE};--quiet")
+    foreach (MEMORYPOOL_IMPLICIT_INCLUDE_DIR IN LISTS CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES)
+        list(APPEND MEMORYPOOL_CLANG_TIDY_COMMAND "--extra-arg=-isystem${MEMORYPOOL_IMPLICIT_INCLUDE_DIR}")
+    endforeach ()
+    set_target_properties(${target} PROPERTIES CXX_CLANG_TIDY "${MEMORYPOOL_CLANG_TIDY_COMMAND}")
+endfunction()
+
+function(memorypool_apply_target_quality target)
+    memorypool_apply_warnings(${target})
+    memorypool_apply_static_analysis(${target})
 endfunction()
 
 add_library(memory_pool STATIC
@@ -51,7 +87,7 @@ target_compile_definitions(memory_pool
         MEMORY_POOL_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
-memorypool_apply_warnings(memory_pool)
+memorypool_apply_target_quality(memory_pool)
 target_compile_definitions(memory_pool PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 target_compile_options(memory_pool PRIVATE
         $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
@@ -68,7 +104,7 @@ if (PROJECT_IS_TOP_LEVEL AND MEMORYPOOL_BUILD_BENCHMARK AND EXISTS "${PROJECT_SO
     target_link_libraries(memory_pool_benchmark PRIVATE MemoryPool::memory_pool)
     target_compile_features(memory_pool_benchmark PRIVATE cxx_std_20)
     target_compile_definitions(memory_pool_benchmark PRIVATE MEMORY_POOL_RESULTS_DIR="${MEMORYPOOL_RESULTS_DIR}")
-    memorypool_apply_warnings(memory_pool_benchmark)
+    memorypool_apply_target_quality(memory_pool_benchmark)
     target_compile_definitions(memory_pool_benchmark PRIVATE $<$<CONFIG:Release>:NDEBUG>)
     target_compile_options(memory_pool_benchmark PRIVATE
             $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
@@ -77,30 +113,39 @@ if (PROJECT_IS_TOP_LEVEL AND MEMORYPOOL_BUILD_BENCHMARK AND EXISTS "${PROJECT_SO
 endif ()
 
 if (PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND MEMORYPOOL_BUILD_TESTS AND EXISTS "${PROJECT_SOURCE_DIR}/test.cpp")
-    add_executable(memory_pool_correctness_tests test.cpp)
-    target_link_libraries(memory_pool_correctness_tests PRIVATE MemoryPool::memory_pool)
-    target_compile_features(memory_pool_correctness_tests PRIVATE cxx_std_20)
-    target_compile_definitions(memory_pool_correctness_tests PRIVATE MEMORY_POOL_CORRECTNESS_ONLY=1)
-    memorypool_apply_warnings(memory_pool_correctness_tests)
-    add_test(NAME memory_pool_correctness COMMAND memory_pool_correctness_tests)
+    function(memorypool_add_test_target target test_name profile_definition)
+        add_executable(${target} test.cpp)
+        target_link_libraries(${target} PRIVATE MemoryPool::memory_pool)
+        target_compile_features(${target} PRIVATE cxx_std_20)
+        target_compile_definitions(${target} PRIVATE MEMORY_POOL_CORRECTNESS_ONLY=1 ${profile_definition})
+        memorypool_apply_target_quality(${target})
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
 
-    set(MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/package-validation-install")
-    add_test(
-            NAME memory_pool_package_validation
-            COMMAND
-            ${CMAKE_COMMAND}
-            "-DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}"
-            "-DPROJECT_BINARY_DIR=${CMAKE_BINARY_DIR}"
-            "-DINSTALL_PREFIX=${MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX}"
-            "-DPACKAGE_VALIDATION_SOURCE_DIR=${PROJECT_SOURCE_DIR}/tests/package_validation"
-            "-DPACKAGE_VALIDATION_BINARY_DIR=${CMAKE_BINARY_DIR}/package-validation-build"
-            "-DGENERATOR=${CMAKE_GENERATOR}"
-            "-DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
-            "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
-            "-DSMOKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
-            "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
-            -P "${PROJECT_SOURCE_DIR}/cmake/run_package_validation.cmake"
-    )
+    memorypool_add_test_target(memory_pool_unit_tests memory_pool_unit MEMORY_POOL_TEST_UNIT=1)
+    memorypool_add_test_target(memory_pool_stress_tests memory_pool_stress MEMORY_POOL_TEST_STRESS=1)
+    memorypool_add_test_target(memory_pool_randomized_tests memory_pool_randomized MEMORY_POOL_TEST_RANDOMIZED=1)
+    memorypool_add_test_target(memory_pool_correctness_tests memory_pool_correctness MEMORY_POOL_TEST_ALL=1)
+
+    if (MEMORYPOOL_ENABLE_PACKAGE_VALIDATION)
+        set(MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/package-validation-install")
+        add_test(
+                NAME memory_pool_package_validation
+                COMMAND
+                ${CMAKE_COMMAND}
+                "-DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}"
+                "-DPROJECT_BINARY_DIR=${CMAKE_BINARY_DIR}"
+                "-DINSTALL_PREFIX=${MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX}"
+                "-DPACKAGE_VALIDATION_SOURCE_DIR=${PROJECT_SOURCE_DIR}/tests/package_validation"
+                "-DPACKAGE_VALIDATION_BINARY_DIR=${CMAKE_BINARY_DIR}/package-validation-build"
+                "-DGENERATOR=${CMAKE_GENERATOR}"
+                "-DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+                "-DVALIDATION_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+                "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+                -P "${PROJECT_SOURCE_DIR}/cmake/run_package_validation.cmake"
+        )
+    endif ()
 endif ()
 
 install(TARGETS memory_pool
