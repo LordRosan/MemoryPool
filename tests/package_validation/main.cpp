@@ -12,11 +12,11 @@ int main() {
     options.max_blocks = 16;
 
     memory_pool::fixed_block_pool pool(options);
-    void* pointer = pool.allocate();
+    void *pointer = pool.allocate();
     pool.deallocate(pointer);
 
     memory_pool::pool_memory_resource resource(pool);
-    std::list<int, memory_pool::pool_allocator<int>> values{memory_pool::pool_allocator<int>(resource)};
+    std::list<int, memory_pool::pool_allocator<int> > values{memory_pool::pool_allocator<int>(resource)};
     values.push_back(1);
     values.push_back(2);
 
