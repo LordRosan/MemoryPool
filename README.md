@@ -1,32 +1,35 @@
 # MemoryPool
 
-MemoryPool is a compact C++20 library for fixed-size allocation workloads. It is structured as a reusable package with explicit API contracts, installable CMake exports, release-only validation, and deterministic benchmark reports.
+MemoryPool 是一个面向固定大小 allocation workload 的 C++20 库。项目按可复用 library 组织，包含明确的 API contracts、可安装的 CMake exports、Release-only validation，以及可重复生成的 benchmark reports。
 
-## What It Provides
+## 功能范围
 
-- `memory_pool::fixed_block_pool`: thread-safe fixed-block slab allocator with ownership checks, optional allocation tracking, exhaustion limits, and runtime statistics.
-- `memory_pool::sharded_fixed_block_pool`: fixed-block allocator split across shards to reduce lock contention in concurrent workloads.
-- `memory_pool::thread_cached_fixed_block_pool`: explicit per-thread cache front-end for reducing hot-path contention.
-- `memory_pool::object_pool<T>`: typed construction/destruction helper built on the fixed-block pool.
-- `memory_pool::pool_memory_resource`: `std::pmr::memory_resource` adapter for PMR-aware containers.
-- `memory_pool::segregated_pool_resource`: PMR resource with multiple small-object size classes and upstream fallback for larger allocations.
-- `memory_pool::config.hpp`: version constants and build-time default policy switches.
-- CMake package export under `MemoryPool::memory_pool` for `add_subdirectory` or installed `find_package` use.
+- `memory_pool::fixed_block_pool`: thread-safe fixed-block slab allocator，支持 ownership checks、可选 allocation tracking、耗尽限制和 runtime statistics。
+- `memory_pool::sharded_fixed_block_pool`: 将 fixed-block allocator 拆分到多个 shard，用于降低并发 workload 下的 lock contention。
+- `memory_pool::thread_cached_fixed_block_pool`: 显式 per-thread cache front-end，用于降低 hot path 上的共享锁访问。
+- `memory_pool::object_pool<T>`: 基于 fixed-block pool 的 typed construction/destruction helper。
+- `memory_pool::pool_allocator<T>`: 基于 `std::pmr::memory_resource` 的 standard allocator adapter。
+- `memory_pool::pool_memory_resource`: 面向 PMR-aware containers 的 `std::pmr::memory_resource` adapter。
+- `memory_pool::segregated_pool_resource`: 支持多个 small-object size classes 的 PMR resource，并为较大 allocation 提供 upstream fallback。
+- `memory_pool::config.hpp`: version constants 和 build-time default policy switches。
+- CMake package export: `MemoryPool::memory_pool`，支持 `add_subdirectory` 或安装后 `find_package` 使用。
 
-## Layout
+## 目录结构
 
 ```text
 include/memory_pool/        Public headers
 source/memory_pool/         Non-template implementation
 cmake/                      Package config template
-test.cpp                    Optional standalone correctness and benchmark runner
+documents/                  API contracts、architecture 和 testing notes
+tests/package_validation/   Installed-package validation project
+test.cpp                    Optional standalone correctness 和 benchmark runner
 results/                    Generated benchmark reports
-CMakePresets.json           Standard Release and Debug-library configure presets
+CMakePresets.json           Standard Release 和 Debug-library configure presets
 .clang-format               Formatting policy
 .editorconfig               Editor defaults
 ```
 
-## Use As A Dependency
+## 作为依赖使用
 
 ```cmake
 add_subdirectory(path/to/MemoryPool)
@@ -45,7 +48,7 @@ void* pointer = pool.allocate();
 pool.deallocate(pointer);
 ```
 
-For mixed small-object PMR workloads:
+对于 mixed small-object PMR workloads：
 
 ```cpp
 #include <memory_pool/memory_pool.hpp>
@@ -55,55 +58,69 @@ std::pmr::vector<std::pmr::string> values(&resource);
 values.emplace_back("cached string");
 ```
 
-## Design Notes
+## 设计说明
 
-The implementation intentionally uses mature allocator building blocks instead of a black-box malloc replacement:
+实现上采用成熟 allocator 的核心 building blocks，而不是把项目做成黑盒 `malloc` replacement：
 
-- Slab allocation amortizes system allocation cost.
-- Embedded free lists make fixed-size allocate/deallocate O(1).
-- Bulk allocate/deallocate APIs reduce repeated lock acquisition for batch-style allocation patterns.
-- Sharding reduces shared mutex contention without hiding the basic algorithm.
-- Explicit `local_cache` objects provide a thread-local fast path while keeping lifetime ownership visible.
-- Size classes route common small allocations to fixed pools while preserving an upstream fallback.
-- Optional tracking catches invalid and double free paths during diagnostics.
-- Slab ownership is RAII-managed during growth, so allocation failures do not leak partially-created slabs.
+- Slab allocation 摊薄 system allocation cost。
+- Embedded free lists 让固定大小 allocate/deallocate 保持 O(1)。
+- Bulk allocate/deallocate APIs 降低 batch-style allocation pattern 中的重复 lock acquisition。
+- Sharding 降低 shared mutex contention，同时保留基础算法的可读性。
+- 显式 `local_cache` 对象提供 thread-local fast path，并让 lifetime ownership 保持可见。
+- Tracking-enabled pools 可以通过 `release_free_slabs()` 把完全空闲的 slabs 归还给系统。
+- Size classes 将常见 small allocations 路由到 fixed pools，同时保留 upstream fallback。
+- Optional tracking 在 diagnostics 场景下捕获 invalid pointer 和 double free paths。
+- Slab ownership 在 growth 过程中由 RAII 管理，allocation failures 不会泄漏 partially-created slabs。
 
-## API Contracts
+## API 契约
 
-- `fixed_block_pool` is internally synchronized; `allocate`, `try_allocate`, `deallocate`, `try_deallocate`, `reserve`, `owns`, and `stats` may be called from multiple threads.
-- `pool_options::enable_tracking` defaults to `true`, so invalid and double-free attempts are rejected instead of corrupting the free list. Disable it only for trusted hot paths where allocator misuse is treated as caller error.
-- `deallocate(nullptr)` and `try_deallocate(nullptr)` are no-ops.
-- `deallocate` throws `std::invalid_argument` for pointers not owned by the pool, or for double-free when tracking is enabled.
-- `allocate` throws `std::bad_alloc` on exhaustion or upstream allocation failure; `try_allocate` returns `nullptr`.
-- `try_allocate_bulk()` is best-effort and returns the number of blocks actually obtained; `allocate_bulk()` is all-or-throw and rolls back blocks allocated in the same call if it cannot complete.
-- `deallocate_bulk()` releases a batch under one lock; `try_deallocate_bulk()` returns the number of pointers accepted.
-- `thread_cached_fixed_block_pool::local_cache` is intended to be owned by one thread. The parent pool must outlive every `local_cache`; each cache flushes its retained blocks on destruction.
-- `thread_cache_options::validate_ownership_on_deallocate` can enable an extra upstream ownership check for diagnostics, but the default fast path avoids that shared-lock check.
-- `clear()` releases all slabs and invalidates every outstanding pointer previously returned by the pool.
-- Lifetime counters such as `allocation_count`, `deallocation_count`, and `failed_allocation_count` are not reset by `clear()`.
-- `pool_stats::reserved_bytes()` and aggregated sharded statistics saturate at `std::numeric_limits<std::size_t>::max()` on arithmetic overflow.
-- `pool_memory_resource` and `segregated_pool_resource` are non-owning with respect to their upstream resource; the upstream resource must outlive them.
-- `segregated_pool_resource` routes requests with alignment greater than `alignof(std::max_align_t)` to the upstream resource.
+- `fixed_block_pool` internally synchronized；`allocate`、`try_allocate`、`deallocate`、`try_deallocate`、`reserve`、`owns` 和 `stats` 可被多个线程调用。
+- `pool_options::enable_tracking` 默认是 `true`，因此 invalid pointer 和 double-free 会被拒绝，而不是破坏 free list。只有在可信 hot path 且 allocator misuse 被视为 caller error 时才建议关闭。
+- `deallocate(nullptr)` 和 `try_deallocate(nullptr)` 是 no-op。
+- `deallocate` 对不属于 pool 的 pointer 抛出 `std::invalid_argument`；tracking 开启时，double free 也会抛出 `std::invalid_argument`。
+- `allocate` 在耗尽或 upstream allocation failure 时抛出 `std::bad_alloc`；`try_allocate` 返回 `nullptr`。
+- `try_allocate_bulk()` 是 best-effort，返回实际取得的 block 数量；`allocate_bulk()` 是 all-or-throw，无法完成时会回滚本次调用中已经分配的 blocks。
+- `deallocate_bulk()` 在一次 lock 下释放 batch；`try_deallocate_bulk()` 返回被接受的 pointer 数量。
+- `thread_cached_fixed_block_pool::local_cache` 设计为单线程拥有。Parent pool 必须长于每个 `local_cache`；每个 cache 析构时会 flush retained blocks。
+- `thread_cache_options::validate_ownership_on_deallocate` 可为 diagnostics 启用额外 upstream ownership check；默认 fast path 避免这类 shared-lock check。
+- `release_free_slabs()` 只释放没有 active allocations 的 slabs。它要求 `enable_tracking=true`；tracking 关闭时返回 `0`，因为 pool 没有足够 metadata 证明 slab 完全空闲。
+- `clear()` 释放所有 slabs，并使此前由 pool 返回的 outstanding pointer 全部失效。
+- `allocation_count`、`deallocation_count`、`failed_allocation_count` 等 lifetime counters 不会被 `clear()` 重置。
+- `pool_stats::reserved_bytes()` 和 aggregated sharded statistics 在 arithmetic overflow 时饱和到 `std::numeric_limits<std::size_t>::max()`。
+- `pool_memory_resource` 和 `segregated_pool_resource` 不拥有 upstream resource；upstream resource 必须长于它们。
+- `segregated_pool_options::enable_tracking` 跟随 `pool_options::enable_tracking` 的默认值。
+- `pool_allocator<T>` 不拥有其 `std::pmr::memory_resource`；resource 必须长于使用该 allocator 的所有 container。
+- `segregated_pool_resource` 会把 alignment 大于 `alignof(std::max_align_t)` 的 requests 路由到 upstream resource。
 
 ## Benchmark
 
-The benchmark is intentionally a removable root-level `test.cpp`. Deleting it does not affect the library target or installed package.
+Benchmark 有意保留为根目录下可删除的 `test.cpp`。删除它不会影响 library target 或 installed package。
 
-Configure and run the benchmark in Release:
+在 Release 下 configure、test 并运行 benchmark：
 
 ```powershell
 cmake --preset release
-cmake --build --preset release
+cmake --build cmake-build-release
+ctest --test-dir cmake-build-release --output-on-failure
 .\cmake-build-release\memory_pool_benchmark.exe
 ```
 
-`test.cpp` runs correctness tests first. If any correctness check fails, it writes a report under `results/`, records the failing case and reason, skips benchmark execution, and exits with a non-zero code.
+`test.cpp` 会先运行 correctness tests。若任一 correctness check 失败，它会在 `results/` 下写入报告，记录失败用例和原因，跳过 benchmark execution，并以 non-zero code 退出。
 
-Reports are written to `results/test-YYYY-MM-DD-HH-MM-SS.md`. The report metadata also records the requested display form `YYYY/MM/DD-HH/MM/SS`; the filename uses dashes because `/` is a path separator on Windows.
+Reports 写入 `results/test-YYYY-MM-DD-HH-MM-SS.md`。Report metadata 也会记录请求展示格式 `YYYY/MM/DD-HH/MM/SS`；文件名使用短横线，因为 `/` 是 path separator。性能表包含 `group`、parameters、`ns/op`、`ops/s`，以及基于同组最低 `ns/op` 的 per-group best comparison。
 
-Non-Release benchmark configuration fails fast. For Debug library-only work, use:
+首次 benchmark 还会初始化 `results/performance-baseline.tsv`。后续 reports 会用当前 `ns/op` 对比该 baseline，记录 `delta ns/op`、`delta %`，并在 baseline comparison table 中解释 `ok`/`watch`/`new` 的判定。
+
+Non-Release benchmark configuration 会 fail fast。Debug library-only 工作使用：
 
 ```powershell
 cmake --preset debug-library
-cmake --build --preset debug-library
+cmake --build cmake-build-debug
+ctest --test-dir cmake-build-debug --output-on-failure
 ```
+
+补充工程文档：
+
+- [API 契约](documents/api-contracts.md)
+- [架构与 invariants](documents/architecture.md)
+- [测试与 Benchmark](documents/testing.md)

@@ -173,6 +173,10 @@ public:
         return upstream_.stats();
     }
 
+    [[nodiscard]] std::size_t release_free_slabs() {
+        return upstream_.release_free_slabs();
+    }
+
     [[nodiscard]] thread_cache_options cache_options() const noexcept {
         return cache_options_;
     }

@@ -74,6 +74,7 @@ public:
     [[nodiscard]] std::size_t try_deallocate_bulk(void* const* pointers, std::size_t count) noexcept;
 
     void reserve(std::size_t block_count);
+    [[nodiscard]] std::size_t release_free_slabs();
     void clear();
 
     [[nodiscard]] bool owns(const void* pointer) const noexcept;

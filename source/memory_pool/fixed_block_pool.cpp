@@ -198,6 +198,62 @@ void fixed_block_pool::reserve(std::size_t block_count) {
     }
 }
 
+std::size_t fixed_block_pool::release_free_slabs() {
+    std::lock_guard lock(mutex_);
+    if (!options_.enable_tracking || slabs_.empty()) {
+        return 0;
+    }
+
+    std::vector<slab> retained;
+    retained.reserve(slabs_.size());
+    std::size_t released = 0;
+    std::size_t retained_blocks = 0;
+
+    for (slab& item : slabs_) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(item.data);
+        const auto end = begin + item.bytes;
+        bool has_active_block = false;
+        for (void* active : active_blocks_) {
+            const auto address = reinterpret_cast<std::uintptr_t>(active);
+            if (address >= begin && address < end) {
+                has_active_block = true;
+                break;
+            }
+        }
+
+        if (has_active_block) {
+            retained_blocks += item.bytes / block_stride_;
+            retained.push_back(std::move(item));
+        } else {
+            ++released;
+        }
+    }
+
+    if (released == 0) {
+        return 0;
+    }
+
+    slabs_ = std::move(retained);
+    free_list_ = nullptr;
+    for (slab& item : slabs_) {
+        auto* begin = static_cast<std::byte*>(item.data);
+        const std::size_t block_count = item.bytes / block_stride_;
+        for (std::size_t i = 0; i < block_count; ++i) {
+            auto* node = reinterpret_cast<free_node*>(begin + i * block_stride_);
+            if (active_blocks_.find(node) == active_blocks_.end()) {
+                node->next = free_list_;
+                free_list_ = node;
+            }
+        }
+    }
+
+    stats_.slab_count = slabs_.size();
+    stats_.total_blocks = retained_blocks;
+    stats_.used_blocks = active_blocks_.size();
+    stats_.free_blocks = retained_blocks - stats_.used_blocks;
+    return released;
+}
+
 void fixed_block_pool::clear() {
     std::lock_guard lock(mutex_);
     slabs_.clear();
@@ -224,11 +280,10 @@ pool_stats fixed_block_pool::stats() const noexcept {
 }
 
 std::size_t fixed_block_pool::normalize_alignment(std::size_t alignment) {
-    alignment = std::max(alignment, alignof(free_node));
     if (!is_power_of_two(alignment)) {
         throw std::invalid_argument("memory_pool::fixed_block_pool requires power-of-two alignment");
     }
-    return alignment;
+    return std::max(alignment, alignof(free_node));
 }
 
 std::size_t fixed_block_pool::align_up(std::size_t value, std::size_t alignment) {

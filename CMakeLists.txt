@@ -9,8 +9,25 @@ project(
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(CTest)
 
 option(MEMORYPOOL_BUILD_BENCHMARK "Build the standalone Release benchmark when test.cpp is present" ${PROJECT_IS_TOP_LEVEL})
+option(MEMORYPOOL_BUILD_TESTS "Build standalone correctness and package validation tests" ${PROJECT_IS_TOP_LEVEL})
+option(MEMORYPOOL_WARNINGS_AS_ERRORS "Treat MemoryPool warnings as errors" OFF)
+
+function(memorypool_apply_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        if(MEMORYPOOL_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        if(MEMORYPOOL_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
 
 add_library(memory_pool STATIC
     source/memory_pool/fixed_block_pool.cpp
@@ -32,14 +49,9 @@ target_compile_definitions(memory_pool
         MEMORY_POOL_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         MEMORY_POOL_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         MEMORY_POOL_VERSION_PATCH=${PROJECT_VERSION_PATCH}
-        MEMORY_POOL_VERSION_STRING="${PROJECT_VERSION}"
 )
 
-if(MSVC)
-    target_compile_options(memory_pool PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(memory_pool PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+memorypool_apply_warnings(memory_pool)
 target_compile_definitions(memory_pool PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 target_compile_options(memory_pool PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
@@ -56,15 +68,38 @@ if(PROJECT_IS_TOP_LEVEL AND MEMORYPOOL_BUILD_BENCHMARK AND EXISTS "${PROJECT_SOU
     target_link_libraries(memory_pool_benchmark PRIVATE MemoryPool::memory_pool)
     target_compile_features(memory_pool_benchmark PRIVATE cxx_std_20)
     target_compile_definitions(memory_pool_benchmark PRIVATE MEMORY_POOL_RESULTS_DIR="${MEMORYPOOL_RESULTS_DIR}")
-    if(MSVC)
-        target_compile_options(memory_pool_benchmark PRIVATE /W4 /permissive-)
-    else()
-        target_compile_options(memory_pool_benchmark PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
+    memorypool_apply_warnings(memory_pool_benchmark)
     target_compile_definitions(memory_pool_benchmark PRIVATE $<$<CONFIG:Release>:NDEBUG>)
     target_compile_options(memory_pool_benchmark PRIVATE
         $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
         $<$<AND:$<CONFIG:Release>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O3>
+    )
+endif()
+
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND MEMORYPOOL_BUILD_TESTS AND EXISTS "${PROJECT_SOURCE_DIR}/test.cpp")
+    add_executable(memory_pool_correctness_tests test.cpp)
+    target_link_libraries(memory_pool_correctness_tests PRIVATE MemoryPool::memory_pool)
+    target_compile_features(memory_pool_correctness_tests PRIVATE cxx_std_20)
+    target_compile_definitions(memory_pool_correctness_tests PRIVATE MEMORY_POOL_CORRECTNESS_ONLY=1)
+    memorypool_apply_warnings(memory_pool_correctness_tests)
+    add_test(NAME memory_pool_correctness COMMAND memory_pool_correctness_tests)
+
+    set(MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/package-validation-install")
+    add_test(
+        NAME memory_pool_package_validation
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}"
+            "-DPROJECT_BINARY_DIR=${CMAKE_BINARY_DIR}"
+            "-DINSTALL_PREFIX=${MEMORYPOOL_PACKAGE_VALIDATION_INSTALL_PREFIX}"
+            "-DPACKAGE_VALIDATION_SOURCE_DIR=${PROJECT_SOURCE_DIR}/tests/package_validation"
+            "-DPACKAGE_VALIDATION_BINARY_DIR=${CMAKE_BINARY_DIR}/package-validation-build"
+            "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+            "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DSMOKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+            "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/run_package_validation.cmake"
     )
 endif()
 

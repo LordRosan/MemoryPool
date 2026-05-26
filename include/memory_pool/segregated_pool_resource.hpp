@@ -14,7 +14,7 @@ struct segregated_pool_options {
     std::size_t blocks_per_slab = 1024;
     bool zero_on_allocate = false;
     bool scribble_on_deallocate = false;
-    bool enable_tracking = false;
+    bool enable_tracking = tracking_enabled_by_default;
     std::pmr::memory_resource* upstream = std::pmr::get_default_resource();
 };
 

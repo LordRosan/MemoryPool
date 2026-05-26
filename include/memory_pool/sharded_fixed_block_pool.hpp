@@ -94,6 +94,14 @@ public:
         }
     }
 
+    [[nodiscard]] std::size_t release_free_slabs() {
+        std::size_t released = 0;
+        for (auto& shard : shards_) {
+            released = pool_stats::saturating_add(released, shard->release_free_slabs());
+        }
+        return released;
+    }
+
     [[nodiscard]] bool owns(const void* pointer) const noexcept {
         return std::any_of(shards_.begin(), shards_.end(), [pointer](const auto& shard) {
             return shard->owns(pointer);
