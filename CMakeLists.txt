@@ -15,20 +15,12 @@ option(MEMORYPOOL_BUILD_BENCHMARK "Build the standalone Release benchmark when t
 option(MEMORYPOOL_BUILD_TESTS "Build standalone correctness and package validation tests" ${PROJECT_IS_TOP_LEVEL})
 option(MEMORYPOOL_ENABLE_PACKAGE_VALIDATION "Enable install-tree package validation through CTest" ON)
 option(MEMORYPOOL_ENABLE_GCC_ANALYZER "Enable GCC -fanalyzer during compilation" OFF)
-option(MEMORYPOOL_ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 option(MEMORYPOOL_WARNINGS_AS_ERRORS "Treat MemoryPool warnings as errors" OFF)
 
 function(memorypool_apply_warnings target)
-    if (MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive-)
-        if (MEMORYPOOL_WARNINGS_AS_ERRORS)
-            target_compile_options(${target} PRIVATE /WX)
-        endif ()
-    else ()
-        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
-        if (MEMORYPOOL_WARNINGS_AS_ERRORS)
-            target_compile_options(${target} PRIVATE -Werror)
-        endif ()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    if (MEMORYPOOL_WARNINGS_AS_ERRORS)
+        target_compile_options(${target} PRIVATE -Werror)
     endif ()
 endfunction()
 
@@ -45,19 +37,6 @@ function(memorypool_apply_static_analysis target)
         endif ()
     endif ()
 
-    if (NOT MEMORYPOOL_ENABLE_CLANG_TIDY)
-        return()
-    endif ()
-
-    find_program(MEMORYPOOL_CLANG_TIDY_EXE NAMES clang-tidy)
-    if (NOT MEMORYPOOL_CLANG_TIDY_EXE)
-        message(FATAL_ERROR "MEMORYPOOL_ENABLE_CLANG_TIDY=ON requires clang-tidy in PATH.")
-    endif ()
-    set(MEMORYPOOL_CLANG_TIDY_COMMAND "${MEMORYPOOL_CLANG_TIDY_EXE};--quiet")
-    foreach (MEMORYPOOL_IMPLICIT_INCLUDE_DIR IN LISTS CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES)
-        list(APPEND MEMORYPOOL_CLANG_TIDY_COMMAND "--extra-arg=-isystem${MEMORYPOOL_IMPLICIT_INCLUDE_DIR}")
-    endforeach ()
-    set_target_properties(${target} PROPERTIES CXX_CLANG_TIDY "${MEMORYPOOL_CLANG_TIDY_COMMAND}")
 endfunction()
 
 function(memorypool_apply_target_quality target)
@@ -90,8 +69,7 @@ target_compile_definitions(memory_pool
 memorypool_apply_target_quality(memory_pool)
 target_compile_definitions(memory_pool PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 target_compile_options(memory_pool PRIVATE
-        $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
-        $<$<AND:$<CONFIG:Release>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O3>
+        $<$<CONFIG:Release>:-O3>
 )
 
 if (PROJECT_IS_TOP_LEVEL AND MEMORYPOOL_BUILD_BENCHMARK AND EXISTS "${PROJECT_SOURCE_DIR}/test.cpp")
@@ -107,8 +85,7 @@ if (PROJECT_IS_TOP_LEVEL AND MEMORYPOOL_BUILD_BENCHMARK AND EXISTS "${PROJECT_SO
     memorypool_apply_target_quality(memory_pool_benchmark)
     target_compile_definitions(memory_pool_benchmark PRIVATE $<$<CONFIG:Release>:NDEBUG>)
     target_compile_options(memory_pool_benchmark PRIVATE
-            $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2>
-            $<$<AND:$<CONFIG:Release>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O3>
+            $<$<CONFIG:Release>:-O3>
     )
 endif ()
 

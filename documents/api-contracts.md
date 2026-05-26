@@ -8,6 +8,7 @@
 - 库不接管 `std::pmr::memory_resource* upstream` 的所有权；调用方必须保证 upstream 生命周期长于依赖它的 resource。
 - `allocate()` 系列在无法满足请求时抛出 `std::bad_alloc` 或具体参数异常；`try_allocate()` 系列把失败转换为 `nullptr` 或实际完成数量。
 - `deallocate(nullptr)` 与 `try_deallocate(nullptr)` 是 no-op。
+- `deallocate_bulk()` 采用 all-or-throw 语义；如果 batch 中存在 invalid pointer 或 duplicate pointer，不会部分释放已验证之前的 block。
 - `pool_stats` 里的累计计数使用 saturating arithmetic；发生溢出时保持 `std::numeric_limits<std::size_t>::max()`。
 
 ## `fixed_block_pool`

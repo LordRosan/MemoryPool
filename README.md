@@ -80,7 +80,7 @@ values.emplace_back("cached string");
 - `deallocate` 对不属于 pool 的 pointer 抛出 `std::invalid_argument`；tracking 开启时，double free 也会抛出 `std::invalid_argument`。
 - `allocate` 在耗尽或 upstream allocation failure 时抛出 `std::bad_alloc`；`try_allocate` 返回 `nullptr`。
 - `try_allocate_bulk()` 是 best-effort，返回实际取得的 block 数量；`allocate_bulk()` 是 all-or-throw，无法完成时会回滚本次调用中已经分配的 blocks。
-- `deallocate_bulk()` 在一次 lock 下释放 batch；`try_deallocate_bulk()` 返回被接受的 pointer 数量。
+- `deallocate_bulk()` 在一次 lock 下以 all-or-throw 语义释放 batch；`try_deallocate_bulk()` 返回被接受的 pointer 数量。
 - `thread_cached_fixed_block_pool::local_cache` 设计为单线程拥有。Parent pool 必须长于每个 `local_cache`；每个 cache 析构时会 flush retained blocks。
 - `thread_cache_options::validate_ownership_on_deallocate` 可为 diagnostics 启用额外 upstream ownership check；默认 fast path 避免这类 shared-lock check。
 - `release_free_slabs()` 只释放没有 active allocations 的 slabs。它要求 `enable_tracking=true`；tracking 关闭时返回 `0`，因为 pool 没有足够 metadata 证明 slab 完全空闲。
@@ -119,7 +119,7 @@ cmake --build cmake-build-debug
 ctest --test-dir cmake-build-debug --output-on-failure
 ```
 
-质量验证提供 `analysis` preset，启用 GCC `-fanalyzer`。`MEMORYPOOL_ENABLE_CLANG_TIDY=ON` 保留为手动可选项，用于能够稳定解析当前工具链 headers 的环境。
+质量验证提供 `analysis` preset，启用 GCC `-fanalyzer`。
 
 补充工程文档：
 

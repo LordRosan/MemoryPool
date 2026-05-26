@@ -168,11 +168,23 @@ namespace memory_pool {
         }
 
         std::lock_guard lock(mutex_);
+        std::vector<void *> validated;
+        validated.reserve(count);
         for (std::size_t i = 0; i < count; ++i) {
-            if (!try_deallocate_unlocked(pointers[i])) {
+            void *pointer = pointers[i];
+            if (pointer == nullptr) {
+                continue;
+            }
+            if (!owns_unlocked(pointer)
+                || (options_.enable_tracking && active_blocks_.find(pointer) == active_blocks_.end())
+                || std::find(validated.begin(), validated.end(), pointer) != validated.end()) {
                 throw std::invalid_argument(
                     "memory_pool::fixed_block_pool deallocate_bulk received a pointer not owned by the pool");
             }
+            validated.push_back(pointer);
+        }
+        for (void *pointer: validated) {
+            (void) try_deallocate_unlocked(pointer);
         }
     }
 

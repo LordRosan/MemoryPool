@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -28,10 +29,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
 
 #ifndef MEMORY_POOL_RESULTS_DIR
 #define MEMORY_POOL_RESULTS_DIR "results"
@@ -147,23 +144,11 @@ namespace {
 #if !defined(MEMORY_POOL_CORRECTNESS_ONLY)
     template<typename T>
     void do_not_optimize(const T &value) {
-#if defined(__GNUC__) || defined(__clang__)
         asm volatile("" : : "m"(value) : "memory");
-#elif defined(_MSC_VER)
-        _ReadWriteBarrier();
-        (void) value;
-#else
-        const volatile auto *sink = &value;
-        (void) sink;
-#endif
     }
 
     void clobber_memory() {
-#if defined(__GNUC__) || defined(__clang__)
         asm volatile("" : : : "memory");
-#elif defined(_MSC_VER)
-        _ReadWriteBarrier();
-#endif
     }
 
     template<typename Warmup, typename Work>
@@ -194,11 +179,7 @@ namespace {
         const auto now = std::chrono::system_clock::now();
         const std::time_t raw = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
-#if defined(_WIN32)
         localtime_s(&tm, &raw);
-#else
-        localtime_r(&raw, &tm);
-#endif
         std::ostringstream out;
         out << std::put_time(&tm, "%Y-%m-%d-%H-%M-%S");
         return out.str();
@@ -208,11 +189,7 @@ namespace {
         const auto now = std::chrono::system_clock::now();
         const std::time_t raw = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
-#if defined(_WIN32)
         localtime_s(&tm, &raw);
-#else
-        localtime_r(&raw, &tm);
-#endif
         std::ostringstream out;
         out << std::put_time(&tm, "%Y/%m/%d-%H/%M/%S");
         return out.str();
@@ -349,6 +326,43 @@ namespace {
 
             pool.deallocate_bulk(pointers.data(), allocated);
             require_correctness(pool.stats().used_blocks == 0, "deallocate_bulk 必须归还所有 block");
+        }));
+
+        checks.push_back(run_correctness_check("fixed_block_pool bulk deallocation all-or-throw", [] {
+            memory_pool::pool_options options;
+            options.block_size = sizeof(payload);
+            options.block_alignment = alignof(payload);
+            options.blocks_per_slab = 4;
+            options.enable_tracking = true;
+
+            memory_pool::fixed_block_pool pool(options);
+            void *first = pool.allocate();
+            void *second = pool.allocate();
+            payload external{};
+            void *invalid_batch[] = {first, &external, second};
+
+            bool rejected_invalid = false;
+            try {
+                pool.deallocate_bulk(invalid_batch, 3);
+            } catch (const std::invalid_argument &) {
+                rejected_invalid = true;
+            }
+            require_correctness(rejected_invalid, "deallocate_bulk 必须拒绝包含 invalid pointer 的 batch");
+            require_correctness(pool.stats().used_blocks == 2, "deallocate_bulk 失败时不得部分释放已验证之前的 block");
+
+            void *duplicate_batch[] = {first, first};
+            bool rejected_duplicate = false;
+            try {
+                pool.deallocate_bulk(duplicate_batch, 2);
+            } catch (const std::invalid_argument &) {
+                rejected_duplicate = true;
+            }
+            require_correctness(rejected_duplicate, "deallocate_bulk 必须拒绝同一 batch 内的 duplicate pointer");
+            require_correctness(pool.stats().used_blocks == 2, "deallocate_bulk 拒绝 duplicate 时不得改变 pool 状态");
+
+            void *valid_batch[] = {first, nullptr, second};
+            pool.deallocate_bulk(valid_batch, 3);
+            require_correctness(pool.stats().used_blocks == 0, "deallocate_bulk 成功路径必须释放所有 non-null block");
         }));
 
         checks.push_back(run_correctness_check("thread_cached_fixed_block_pool local cache", [] {
